@@ -73,6 +73,8 @@ Run it from the repo you want the agent to work on:
 
 ```bash
 cd ~/code/my-project
+code-airlock doctor       # check sbx, virtualization, login, and git
+code-airlock --dry-run up # preview the sbx commands without running them
 code-airlock init         # optional: add starter AGENTS.md instructions
 code-airlock up           # start Claude Code in a sandbox
 ```
@@ -114,6 +116,22 @@ exit
 ```
 
 Then fetch and review from the host.
+
+## First-Run Checks
+
+Most setup failures come from missing Docker Sandboxes, missing KVM/virtualization support, or an unauthenticated `sbx` CLI. Check before launching:
+
+```bash
+code-airlock doctor
+```
+
+Preview what Code Airlock would run without creating a sandbox:
+
+```bash
+code-airlock --dry-run up
+```
+
+Dry-run mode prints the `sbx` and git commands instead of running them. It is useful on machines that cannot run KVM yet, or when you want to understand the workflow before creating a VM.
 
 For a visual review, use:
 
@@ -199,6 +217,14 @@ code-airlock lockdown
 
 Run `lockdown` after the sandbox exists. It sets Docker Sandboxes' global default to deny-all, then applies Code Airlock's allowlist to the named sandbox.
 
+Undo the global policy change with:
+
+```bash
+code-airlock unlock
+```
+
+`unlock` runs `sbx policy reset`, which restores Docker Sandboxes' policy defaults.
+
 The default allowlist covers Anthropic, OpenAI, GitHub, and npm:
 
 ```bash
@@ -263,6 +289,7 @@ ALLOW=api.anthropic.com,*.anthropic.com,github.com,*.github.com
 | Command | What it does |
 | --- | --- |
 | `up [-- agent-args]` | Create and start the sandbox in clone mode with the selected agent |
+| `doctor` | Check `sbx`, virtualization/KVM, git, daemon reachability, and login status |
 | `init` | Create a starter `AGENTS.md` in the target repo |
 | `shell` | Open a shell inside the running sandbox |
 | `fetch` | Fetch the sandbox commits into your local repo |
@@ -273,12 +300,19 @@ ALLOW=api.anthropic.com,*.anthropic.com,github.com,*.github.com
 | `stop` | Stop the sandbox but keep its VM and commits |
 | `rm` | Remove the sandbox after offering to fetch commits |
 | `lockdown` | Set the global policy to deny-all and apply the allowlist to an existing sandbox |
+| `unlock` | Reset Docker Sandboxes policies with `sbx policy reset` |
+
+Global option:
+
+| Option | What it does |
+| --- | --- |
+| `--dry-run` | Print commands instead of running them |
 
 ## Security Notes
 
 - The isolation boundary is the Docker Sandbox microVM, not the agent's own permission model.
 - Clone mode keeps your host repo mounted read-only.
-- `lockdown` sets the default network policy to deny-all for all Docker Sandboxes. Revert with `sbx policy reset`.
+- `lockdown` sets the default network policy to deny-all for all Docker Sandboxes. Revert with `code-airlock unlock`.
 - Keep the allowlist as narrow as the task allows. Allowed hosts remain possible egress paths.
 - Do not give the sandbox broad credentials unless the task truly requires them.
 - `code-airlock rm` deletes the sandbox clone. Fetch or push anything you want to keep first.

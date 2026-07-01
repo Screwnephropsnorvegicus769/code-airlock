@@ -20,6 +20,7 @@ CONF="$(cd "$(dirname "$0")" && pwd)/sandbox.conf"
 REPO_DIR="${REPO_DIR:-$PWD}"             # repo the agent works on
 : "${GLOBAL_NETWORK_POLICY:=balanced}"   # allow-all, balanced, deny-all
 : "${REVIEW_TOOL:=vscode}"               # git difftool name, e.g. vscode, opendiff, vimdiff
+: "${DRY_RUN:=0}"                        # 1 prints commands without running them
 
 # Sandbox name derived from the repo folder, sanitized to a safe token.
 _repo_base="$(basename "$REPO_DIR")"
@@ -40,7 +41,30 @@ die()  { err "$*"; exit 1; }
 
 need() { command -v "$1" >/dev/null 2>&1 || die "Required command not found: $1"; }
 
+print_cmd() {
+  printf '+'
+  printf ' %q' "$@"
+  printf '\n'
+}
+
+run_cmd() {
+  if [ "$DRY_RUN" = 1 ]; then
+    print_cmd "$@"
+  else
+    "$@"
+  fi
+}
+
+run_sbx() {
+  run_cmd sbx "$@"
+}
+
+doctor_ok() { printf '\033[32mOK\033[0m   %s\n' "$*"; }
+doctor_warn() { printf '\033[33mWARN\033[0m %s\n' "$*"; DOCTOR_WARNS=$((DOCTOR_WARNS + 1)); }
+doctor_fail() { printf '\033[31mFAIL\033[0m %s\n' "$*"; DOCTOR_FAILS=$((DOCTOR_FAILS + 1)); }
+
 preflight() {
+  [ "$DRY_RUN" = 1 ] && return 0
   need sbx
   need git
   if [ "$(uname -s)" = "Linux" ] && ! lsmod 2>/dev/null | grep -q kvm; then
@@ -66,6 +90,11 @@ running() { sbx exec "$NAME" true >/dev/null 2>&1; }
 
 init_global_network_policy() {
   info "Initializing Docker Sandboxes global network policy if needed: $GLOBAL_NETWORK_POLICY"
+  if [ "$DRY_RUN" = 1 ]; then
+    run_sbx policy init "$GLOBAL_NETWORK_POLICY"
+    return 0
+  fi
+
   if policy_output="$(sbx policy init "$GLOBAL_NETWORK_POLICY" 2>&1)"; then
     return 0
   fi
@@ -83,7 +112,7 @@ init_global_network_policy() {
 
 apply_network() {
   info "Restricting network for '$NAME' to: $ALLOW"
-  if sbx policy allow network --sandbox "$NAME" "$ALLOW"; then
+  if run_sbx policy allow network --sandbox "$NAME" "$ALLOW"; then
     return 0
   fi
 
@@ -100,7 +129,7 @@ sandbox_ref() {
 }
 
 fetch_sandbox() {
-  git -C "$REPO_DIR" fetch "sandbox-$NAME"
+  run_cmd git -C "$REPO_DIR" fetch "sandbox-$NAME"
 }
 
 agents_file() {
@@ -155,12 +184,18 @@ agent_hint() {
 cmd_up() {
   preflight
   cd "$REPO_DIR"
-  ensure_repo
-  running && die "Sandbox '$NAME' already exists. Use '$0 shell', or '$0 rm' to recreate."
+  if [ "$DRY_RUN" != 1 ]; then
+    ensure_repo
+    running && die "Sandbox '$NAME' already exists. Use '$0 shell', or '$0 rm' to recreate."
+  fi
 
   hint_agents_file
   init_global_network_policy
-  info "Starting $AGENT in a microVM sandbox '$NAME' (clone mode)."
+  if [ "$DRY_RUN" = 1 ]; then
+    info "Would start $AGENT in a microVM sandbox '$NAME' (clone mode)."
+  else
+    info "Starting $AGENT in a microVM sandbox '$NAME' (clone mode)."
+  fi
   info "Review its commits on your host with:  git fetch sandbox-$NAME"
   agent_hint
   warn "Full network isolation applies only under a balanced/deny-all default."
@@ -172,16 +207,21 @@ cmd_up() {
   # Any extra args after the command are passed through to the agent, e.g.:
   #   ./code-airlock up -- -p "refactor the auth module and run the tests"
   if [ "$#" -gt 0 ]; then
-    sbx run --clone --name "$NAME" "$AGENT" "$@"
+    run_sbx run --clone --name "$NAME" "$AGENT" "$@"
   else
-    sbx run --clone --name "$NAME" "$AGENT"
+    run_sbx run --clone --name "$NAME" "$AGENT"
   fi
 }
 
-cmd_shell() { preflight; sbx exec -it "$NAME" bash; }
+cmd_shell() { preflight; run_sbx exec -it "$NAME" bash; }
 
 cmd_init() {
   [ -d "$REPO_DIR" ] || die "Repo directory does not exist: $REPO_DIR"
+  if [ "$DRY_RUN" = 1 ]; then
+    info "Dry run only. Would create $(agents_file)"
+    return 0
+  fi
+
   write_agents_file
   info "Created $(agents_file)"
 }
@@ -192,7 +232,7 @@ cmd_diff() {
   preflight
   base="${1:-$(current_branch)}"
   fetch_sandbox
-  git -C "$REPO_DIR" diff "$base..$(sandbox_ref "$base")"
+  run_cmd git -C "$REPO_DIR" diff "$base..$(sandbox_ref "$base")"
 }
 
 cmd_review() {
@@ -201,11 +241,13 @@ cmd_review() {
   fetch_sandbox
 
   ref="$(sandbox_ref "$base")"
-  git -C "$REPO_DIR" rev-parse --verify "$ref" >/dev/null \
-    || die "Sandbox branch not found: $ref"
+  if [ "$DRY_RUN" != 1 ]; then
+    git -C "$REPO_DIR" rev-parse --verify "$ref" >/dev/null \
+      || die "Sandbox branch not found: $ref"
+  fi
 
   info "Opening visual review with git difftool: $REVIEW_TOOL"
-  git -C "$REPO_DIR" difftool --dir-diff --no-prompt --tool="$REVIEW_TOOL" "$base" "$ref"
+  run_cmd git -C "$REPO_DIR" difftool --dir-diff --no-prompt --tool="$REVIEW_TOOL" "$base" "$ref"
 }
 
 cmd_merge() {
@@ -213,16 +255,30 @@ cmd_merge() {
   base="${1:-$(current_branch)}"
   fetch_sandbox
   info "Merging sandbox-$NAME/$base into $base"
-  git -C "$REPO_DIR" merge "$(sandbox_ref "$base")"
+  run_cmd git -C "$REPO_DIR" merge "$(sandbox_ref "$base")"
 }
 
-cmd_net()  { preflight; sbx policy log; }
+cmd_net()  { preflight; run_sbx policy log; }
 
-cmd_stop() { preflight; sbx stop "$NAME"; info "Stopped '$NAME'. Its VM and commits are preserved."; }
+cmd_stop() {
+  preflight
+  run_sbx stop "$NAME"
+  if [ "$DRY_RUN" = 1 ]; then
+    info "Dry run only. '$NAME' was not stopped."
+  else
+    info "Stopped '$NAME'. Its VM and commits are preserved."
+  fi
+}
 
 cmd_rm() {
   preflight
   warn "Removing '$NAME' deletes its clone. Unfetched or unpushed commits are lost."
+  if [ "$DRY_RUN" = 1 ]; then
+    print_cmd git -C "$REPO_DIR" fetch "sandbox-$NAME"
+    run_sbx rm "$NAME"
+    return 0
+  fi
+
   printf 'Fetch its commits first? [Y/n] '
   read -r ans
   [ "${ans:-}" = n ] || git -C "$REPO_DIR" fetch "sandbox-$NAME" 2>/dev/null || true
@@ -233,21 +289,109 @@ cmd_lockdown() {
   preflight
   info "Setting the default network policy to deny-all for all sandboxes."
   info "Revert at any time with:  sbx policy reset"
-  sbx policy set-default deny-all
+  run_sbx policy set-default deny-all
   if apply_network; then
-    info "Locked down. '$NAME' may reach only the allowlist above."
+    if [ "$DRY_RUN" = 1 ]; then
+      info "Dry run only. No network policy was changed."
+    else
+      info "Locked down. '$NAME' may reach only the allowlist above."
+    fi
   else
     warn "Global deny-all policy is set, but the per-sandbox allowlist was not applied."
   fi
+}
+
+cmd_unlock() {
+  preflight
+  info "Resetting Docker Sandboxes policies to defaults."
+  run_sbx policy reset
+  [ "$DRY_RUN" = 1 ] && info "Dry run only. No network policy was reset."
+}
+
+cmd_doctor() {
+  DOCTOR_FAILS=0
+  DOCTOR_WARNS=0
+
+  info "Checking Code Airlock prerequisites..."
+
+  if command -v sbx >/dev/null 2>&1; then
+    version="$(sbx version 2>/dev/null || true)"
+    doctor_ok "sbx installed${version:+ ($version)}"
+  else
+    doctor_fail "sbx is not installed. Install Docker Sandboxes first."
+  fi
+
+  if command -v git >/dev/null 2>&1; then
+    doctor_ok "git installed ($(git --version))"
+  else
+    doctor_fail "git is not installed. Clone mode and review commands require git."
+  fi
+
+  case "$(uname -s)" in
+    Linux)
+      if [ -e /dev/kvm ] || { command -v lsmod >/dev/null 2>&1 && lsmod 2>/dev/null | grep -q kvm; }; then
+        doctor_ok "KVM virtualization available"
+      else
+        doctor_fail "KVM virtualization not detected. Enable hardware virtualization and ensure /dev/kvm is available."
+      fi
+      ;;
+    Darwin)
+      if [ "$(uname -m)" = arm64 ]; then
+        doctor_ok "Apple Silicon host detected"
+      elif [ "$(sysctl -n kern.hv_support 2>/dev/null || echo 0)" = 1 ]; then
+        doctor_ok "macOS Hypervisor framework available"
+      else
+        doctor_fail "macOS virtualization support not detected."
+      fi
+      ;;
+    MINGW*|MSYS*|CYGWIN*)
+      doctor_warn "Windows virtualization was not checked. Docker Sandboxes requires Windows 11 with Hypervisor Platform under WSL2."
+      ;;
+    *)
+      doctor_warn "Unsupported host OS for automatic virtualization check: $(uname -s)"
+      ;;
+  esac
+
+  if command -v sbx >/dev/null 2>&1; then
+    if sbx ls >/dev/null 2>&1; then
+      doctor_ok "sbx daemon reachable and user appears logged in"
+    else
+      sbx_output="$(sbx ls 2>&1 || true)"
+      case "$sbx_output" in
+        *authentication*|*"not logged"*|*"login"*)
+          doctor_fail "sbx authentication failed. Run: sbx login"
+          ;;
+        *daemon*|*"not reachable"*|*"connection refused"*|*"no such file"*)
+          doctor_fail "sbx daemon is not reachable. Try: sbx setup, then sbx login"
+          ;;
+        *)
+          doctor_fail "sbx is installed, but a basic sbx command failed: $sbx_output"
+          ;;
+      esac
+    fi
+  fi
+
+  if [ "$DOCTOR_FAILS" -eq 0 ]; then
+    if [ "$DOCTOR_WARNS" -eq 0 ]; then
+      info "Doctor passed."
+    else
+      warn "Doctor passed with $DOCTOR_WARNS warning(s)."
+    fi
+    return 0
+  fi
+
+  warn "Doctor found $DOCTOR_FAILS problem(s). Run 'sbx diagnose' for deeper Docker Sandboxes diagnostics."
+  return 1
 }
 
 usage() {
   cat <<EOF
 code-airlock — run coding agents in a Docker Sandbox microVM
 
-Usage: $(basename "$0") <command> [args]
+Usage: $(basename "$0") [--dry-run] <command> [args]
 
   up [-- agent-args]  Create and start the sandbox (clone mode, agent-specific bypass mode)
+  doctor              Check sbx, virtualization/KVM, git, daemon, and login status
   shell               Open a shell inside the running sandbox
   fetch               git fetch the agent's commits (remote: sandbox-<name>)
   diff  [base]        Fetch, then diff base..sandbox-<name>/base
@@ -257,6 +401,7 @@ Usage: $(basename "$0") <command> [args]
   stop                Stop the sandbox, keeping the VM and its commits
   rm                  Remove the sandbox (offers to fetch first, then deletes it)
   lockdown            Set deny-all default policy and allowlist an existing sandbox
+  unlock              Reset Docker Sandboxes policies with: sbx policy reset
   init                Create a starter AGENTS.md in the target repo
   help                Show this message
 
@@ -266,8 +411,25 @@ Active sandbox name: $NAME
 EOF
 }
 
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --dry-run)
+      DRY_RUN=1
+      shift
+      ;;
+    --)
+      shift
+      break
+      ;;
+    *)
+      break
+      ;;
+  esac
+done
+
 case "${1:-help}" in
   up)       shift; cmd_up "$@" ;;
+  doctor)   shift; cmd_doctor "$@" ;;
   init)     shift; cmd_init "$@" ;;
   shell)    shift; cmd_shell "$@" ;;
   fetch)    shift; cmd_fetch "$@" ;;
@@ -278,6 +440,7 @@ case "${1:-help}" in
   stop)     shift; cmd_stop "$@" ;;
   rm)       shift; cmd_rm "$@" ;;
   lockdown) shift; cmd_lockdown "$@" ;;
+  unlock)   shift; cmd_unlock "$@" ;;
   help|-h|--help) usage ;;
   *) err "Unknown command: $1"; echo; usage; exit 1 ;;
 esac
