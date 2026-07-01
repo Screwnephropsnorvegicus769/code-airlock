@@ -82,8 +82,12 @@ init_global_network_policy() {
 
 apply_network() {
   info "Restricting network for '$NAME' to: $ALLOW"
-  sbx policy allow network --sandbox "$NAME" "$ALLOW" \
-    || warn "Could not apply network rules. Check: sbx policy ls"
+  if sbx policy allow network --sandbox "$NAME" "$ALLOW"; then
+    return 0
+  fi
+
+  warn "Could not apply network rules. Make sure sandbox '$NAME' exists, then check: sbx policy ls"
+  return 1
 }
 
 current_branch() {
@@ -151,7 +155,7 @@ cmd_up() {
   info "Review its commits on your host with:  git fetch sandbox-$NAME"
   agent_hint
   warn "Full network isolation applies only under a balanced/deny-all default."
-  warn "For strict isolation run once:  $0 lockdown"
+  warn "For strict isolation after the sandbox exists, run:  $0 lockdown"
   info "First launch may take a few minutes while Docker creates the VM and prepares the agent kit."
 
   # --clone: agent works on a private clone; host repo mounted read-only.
@@ -208,8 +212,11 @@ cmd_lockdown() {
   info "Setting the default network policy to deny-all for all sandboxes."
   info "Revert at any time with:  sbx policy reset"
   sbx policy set-default deny-all
-  apply_network
-  info "Locked down. '$NAME' may reach only the allowlist above."
+  if apply_network; then
+    info "Locked down. '$NAME' may reach only the allowlist above."
+  else
+    warn "Global deny-all policy is set, but the per-sandbox allowlist was not applied."
+  fi
 }
 
 usage() {
@@ -226,7 +233,7 @@ Usage: $(basename "$0") <command> [args]
   net                 Show the sandbox network log (allowed / blocked hosts)
   stop                Stop the sandbox, keeping the VM and its commits
   rm                  Remove the sandbox (offers to fetch first, then deletes it)
-  lockdown            Set deny-all default policy and reapply the allowlist
+  lockdown            Set deny-all default policy and allowlist an existing sandbox
   init                Create a starter AGENTS.md in the target repo
   help                Show this message
 
