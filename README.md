@@ -62,6 +62,7 @@ When the agent has made changes, review them from your host:
 ```bash
 code-airlock fetch
 code-airlock diff
+code-airlock review      # optional: open a visual diff
 code-airlock merge
 ```
 
@@ -86,6 +87,21 @@ exit
 ```
 
 Then fetch and review from the host.
+
+For a visual review, use:
+
+```bash
+code-airlock review
+```
+
+This fetches the sandbox branch and opens a Git directory diff using VS Code by default. Your working tree is not modified by the review command.
+
+Use another Git difftool:
+
+```bash
+REVIEW_TOOL=opendiff code-airlock review
+REVIEW_TOOL=vimdiff code-airlock review
+```
 
 ## Agent Instructions
 
@@ -209,6 +225,7 @@ SANDBOX_NAME=sbx-my-project
 AGENT=claude
 REPO_DIR=/absolute/path/to/repo
 GLOBAL_NETWORK_POLICY=balanced
+REVIEW_TOOL=vscode
 ALLOW=api.anthropic.com,*.anthropic.com,github.com,*.github.com
 ```
 
@@ -223,6 +240,7 @@ ALLOW=api.anthropic.com,*.anthropic.com,github.com,*.github.com
 | `shell` | Open a shell inside the running sandbox |
 | `fetch` | Fetch the sandbox commits into your local repo |
 | `diff [base]` | Fetch, then show `base..sandbox-<name>/base` |
+| `review [base]` | Fetch, then open a visual Git difftool review |
 | `merge [base]` | Fetch, then merge the sandbox branch into `base` |
 | `net` | Show allowed and blocked network hosts |
 | `stop` | Stop the sandbox but keep its VM and commits |
