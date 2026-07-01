@@ -21,11 +21,14 @@ REPO_DIR="${REPO_DIR:-$PWD}"             # repo the agent works on
 : "${GLOBAL_NETWORK_POLICY:=balanced}"   # allow-all, balanced, deny-all
 : "${REVIEW_TOOL:=vscode}"               # git difftool name, e.g. vscode, opendiff, vimdiff
 : "${DRY_RUN:=0}"                        # 1 prints commands without running them
+: "${USE_TMUX:=0}"                       # 1 runs `up` inside a host tmux session
+: "${TMUX_ATTACH:=1}"                    # 1 attaches after starting a tmux-backed `up`
 
 # Sandbox name derived from the repo folder, sanitized to a safe token.
 _repo_base="$(basename "$REPO_DIR")"
 _default_name="sbx-${_repo_base//[^a-zA-Z0-9._-]/-}"
 NAME="${SANDBOX_NAME:-$_default_name}"
+TMUX_SESSION="${TMUX_SESSION:-code-airlock-$NAME}"
 
 # Hosts the sandbox may reach. Everything else is blocked once you run
 # `lockdown` (or if your default sbx policy is already balanced/deny-all).
@@ -45,6 +48,12 @@ print_cmd() {
   printf '+'
   printf ' %q' "$@"
   printf '\n'
+}
+
+quote_words() {
+  for word in "$@"; do
+    printf ' %q' "$word"
+  done
 }
 
 run_cmd() {
@@ -181,7 +190,53 @@ agent_hint() {
 }
 
 # ---- commands ---------------------------------------------------------------
+cmd_up_tmux() {
+  [ "$DRY_RUN" = 1 ] || need tmux
+  session="$TMUX_SESSION"
+  tmux_shell="${SHELL:-/bin/sh}"
+  script_path="$(cd "$(dirname "$0")" && pwd)/$(basename "$0")"
+  inner_cmd="AGENT=$(printf '%q' "$AGENT") REPO_DIR=$(printf '%q' "$REPO_DIR") SANDBOX_NAME=$(printf '%q' "$NAME") GLOBAL_NETWORK_POLICY=$(printf '%q' "$GLOBAL_NETWORK_POLICY") REVIEW_TOOL=$(printf '%q' "$REVIEW_TOOL") TMUX_SESSION=$(printf '%q' "$TMUX_SESSION") ALLOW=$(printf '%q' "$ALLOW") $(printf '%q' "$script_path") up$(quote_words "$@")"
+
+  if [ "$DRY_RUN" != 1 ] && tmux has-session -t "$session" 2>/dev/null; then
+    die "tmux session '$session' already exists. Attach with: tmux attach -t $session"
+  fi
+
+  info "Starting Code Airlock in tmux session '$session'."
+  info "Detach without stopping the agent: Ctrl-b, then d"
+  [ "$TMUX_ATTACH" = 1 ] || info "Attach later with: $0 attach"
+  run_cmd tmux new-session -d -s "$session" -c "$REPO_DIR" "$tmux_shell"
+  run_cmd tmux send-keys -t "$session" "$inner_cmd" C-m
+  if [ "$DRY_RUN" != 1 ]; then
+    sleep 1
+    tmux has-session -t "$session" 2>/dev/null || die "tmux session '$session' exited immediately. Inspect tmux/server output with: tmux list-sessions"
+  fi
+  [ "$TMUX_ATTACH" = 1 ] && attach_tmux_session "$session"
+}
+
+attach_tmux_session() {
+  session="${1:-$TMUX_SESSION}"
+  if [ -n "${TMUX:-}" ]; then
+    run_cmd tmux switch-client -t "$session"
+  else
+    run_cmd tmux attach -t "$session"
+  fi
+}
+
+cmd_attach() {
+  [ "$DRY_RUN" = 1 ] || need tmux
+  if [ "$DRY_RUN" != 1 ] && ! tmux has-session -t "$TMUX_SESSION" 2>/dev/null; then
+    die "tmux session '$TMUX_SESSION' not found. Start one with: $0 --tmux up"
+  fi
+
+  attach_tmux_session "$TMUX_SESSION"
+}
+
 cmd_up() {
+  if [ "$USE_TMUX" = 1 ]; then
+    cmd_up_tmux "$@"
+    return 0
+  fi
+
   preflight
   cd "$REPO_DIR"
   if [ "$DRY_RUN" != 1 ]; then
@@ -388,10 +443,11 @@ usage() {
   cat <<EOF
 code-airlock — run coding agents in a Docker Sandbox microVM
 
-Usage: $(basename "$0") [--dry-run] <command> [args]
+Usage: $(basename "$0") [--dry-run] [--tmux|--tmux-detached] <command> [args]
 
   up [-- agent-args]  Create and start the sandbox (clone mode, agent-specific bypass mode)
   doctor              Check sbx, virtualization/KVM, git, daemon, and login status
+  attach              Attach to this repo's Code Airlock tmux session
   shell               Open a shell inside the running sandbox
   fetch               git fetch the agent's commits (remote: sandbox-<name>)
   diff  [base]        Fetch, then diff base..sandbox-<name>/base
@@ -405,9 +461,15 @@ Usage: $(basename "$0") [--dry-run] <command> [args]
   init                Create a starter AGENTS.md in the target repo
   help                Show this message
 
+Options:
+  --dry-run           Print commands without running them
+  --tmux              Run 'up' inside a host tmux session and attach
+  --tmux-detached     Run 'up' inside a detached host tmux session
+
 Config: edit ./sandbox.conf (see sandbox.conf.example) or set env vars.
 Active agent: $AGENT
 Active sandbox name: $NAME
+Active tmux session: $TMUX_SESSION
 EOF
 }
 
@@ -415,6 +477,16 @@ while [ "$#" -gt 0 ]; do
   case "$1" in
     --dry-run)
       DRY_RUN=1
+      shift
+      ;;
+    --tmux)
+      USE_TMUX=1
+      TMUX_ATTACH=1
+      shift
+      ;;
+    --tmux-detached)
+      USE_TMUX=1
+      TMUX_ATTACH=0
       shift
       ;;
     --)
@@ -430,6 +502,7 @@ done
 case "${1:-help}" in
   up)       shift; cmd_up "$@" ;;
   doctor)   shift; cmd_doctor "$@" ;;
+  attach)   shift; cmd_attach "$@" ;;
   init)     shift; cmd_init "$@" ;;
   shell)    shift; cmd_shell "$@" ;;
   fetch)    shift; cmd_fetch "$@" ;;

@@ -98,6 +98,13 @@ code-airlock init         # optional: add starter AGENTS.md instructions
 code-airlock up           # start Claude Code in a sandbox
 ```
 
+On a remote server, keep the agent running after your SSH connection closes:
+
+```bash
+code-airlock --tmux up
+code-airlock attach
+```
+
 Use another agent:
 
 ```bash
@@ -151,6 +158,29 @@ code-airlock --dry-run up
 ```
 
 Dry-run mode prints the `sbx` and git commands instead of running them. It is useful on machines that cannot run KVM yet, or when you want to understand the workflow before creating a VM.
+
+## Remote / Server Runs
+
+Use `--tmux` to start the sandboxed agent inside a host-side tmux session:
+
+```bash
+code-airlock --tmux up
+```
+
+This keeps the terminal session alive if your SSH connection drops. Reattach later with:
+
+```bash
+code-airlock attach
+```
+
+The default session name is `code-airlock-<sandbox-name>`. Override it with:
+
+```bash
+TMUX_SESSION=agent-work code-airlock --tmux up
+TMUX_SESSION=agent-work code-airlock attach
+```
+
+To disconnect from tmux without stopping the coding agent, press `Ctrl-b`, then `d`. This detaches your terminal and leaves the agent running in the tmux session.
 
 For a visual review, use:
 
@@ -298,6 +328,7 @@ AGENT=claude
 REPO_DIR=/absolute/path/to/repo
 GLOBAL_NETWORK_POLICY=balanced
 REVIEW_TOOL=vscode
+TMUX_SESSION=code-airlock-sbx-my-project
 ALLOW=api.anthropic.com,*.anthropic.com,github.com,*.github.com
 ```
 
@@ -309,6 +340,7 @@ ALLOW=api.anthropic.com,*.anthropic.com,github.com,*.github.com
 | --- | --- |
 | `up [-- agent-args]` | Create and start the sandbox in clone mode with the selected agent |
 | `doctor` | Check `sbx`, virtualization/KVM, git, daemon reachability, and login status |
+| `attach` | Attach to this repo's Code Airlock tmux session |
 | `init` | Create a starter `AGENTS.md` in the target repo |
 | `shell` | Open a shell inside the running sandbox |
 | `fetch` | Fetch the sandbox commits into your local repo |
@@ -326,6 +358,7 @@ Global option:
 | Option | What it does |
 | --- | --- |
 | `--dry-run` | Print commands instead of running them |
+| `--tmux` | Run `up` inside a host-side tmux session |
 
 ## Security Notes
 

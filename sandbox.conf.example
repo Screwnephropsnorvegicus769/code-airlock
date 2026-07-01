@@ -19,6 +19,9 @@
 # Common choices: vscode, opendiff, vimdiff
 # REVIEW_TOOL=vscode
 
+# tmux session used by `code-airlock --tmux up`.
+# TMUX_SESSION=code-airlock-sbx-myproject
+
 # Comma-separated network allowlist. Under `lockdown` (deny-all default),
 # the sandbox can reach only these hosts. Add the registries and APIs your
 # build actually needs. A few common extras are shown commented below.
