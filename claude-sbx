@@ -1,0 +1,172 @@
+#!/usr/bin/env bash
+# claude-sbx — run Claude Code unattended in a Docker Sandbox (microVM),
+# with git-observable output and a locked-down network.
+#
+# The agent runs inside a disposable microVM with a hard hypervisor boundary
+# from your host. In clone mode it commits to a private clone; your repo is
+# mounted read-only and you review its work with a normal `git fetch`.
+#
+# Repo: https://github.com/YOUR_USER/claude-sbx   License: MIT
+
+set -euo pipefail
+
+# ---- config -----------------------------------------------------------------
+# Defaults below can be overridden in ./sandbox.conf or via environment vars.
+CONF="$(cd "$(dirname "$0")" && pwd)/sandbox.conf"
+# shellcheck disable=SC1090
+[ -f "$CONF" ] && . "$CONF"
+
+: "${AGENT:=claude}"                     # claude, codex, gemini, copilot, opencode, kiro
+REPO_DIR="${REPO_DIR:-$PWD}"             # repo the agent works on
+
+# Sandbox name derived from the repo folder, sanitized to a safe token.
+_default_name="sbx-$(basename "$REPO_DIR" | tr -c 'a-zA-Z0-9._-' '-')"
+NAME="${SANDBOX_NAME:-$_default_name}"
+
+# Hosts the sandbox may reach. Everything else is blocked once you run
+# `lockdown` (or if your default sbx policy is already balanced/deny-all).
+ALLOW="${ALLOW:-api.anthropic.com,*.anthropic.com,github.com,*.github.com,codeload.github.com,objects.githubusercontent.com,registry.npmjs.org,*.npmjs.org}"
+
+# ---- helpers ----------------------------------------------------------------
+_c()  { printf '\033[%sm%s\033[0m\n' "$1" "$2"; }
+info() { _c 36 "$*"; }
+warn() { _c 33 "$*" >&2; }
+err()  { _c 31 "$*" >&2; }
+die()  { err "$*"; exit 1; }
+
+need() { command -v "$1" >/dev/null 2>&1 || die "Required command not found: $1"; }
+
+preflight() {
+  need sbx
+  need git
+  if [ "$(uname -s)" = "Linux" ] && ! lsmod 2>/dev/null | grep -q kvm; then
+    warn "KVM not detected. Docker Sandboxes needs hardware virtualization on Linux."
+  fi
+}
+
+is_git_repo() { git -C "$REPO_DIR" rev-parse --git-dir >/dev/null 2>&1; }
+
+ensure_repo() {
+  is_git_repo && return 0
+  warn "No git repository found in $REPO_DIR."
+  printf 'Initialize one now (needed for clone mode)? [y/N] '
+  read -r ans
+  [ "${ans:-}" = y ] || die "Aborting: clone mode requires a git repo."
+  git -C "$REPO_DIR" init -q
+  git -C "$REPO_DIR" add -A
+  git -C "$REPO_DIR" commit -qm "chore: initial commit" --allow-empty
+  info "Initialized a git repo with an initial commit."
+}
+
+running() { sbx exec "$NAME" true >/dev/null 2>&1; }
+
+apply_network() {
+  info "Restricting network for '$NAME' to: $ALLOW"
+  sbx policy allow network --sandbox "$NAME" "$ALLOW" >/dev/null 2>&1 \
+    || warn "Could not apply network rules yet. Check: sbx policy ls"
+}
+
+current_branch() {
+  git -C "$REPO_DIR" symbolic-ref --short HEAD 2>/dev/null || echo main
+}
+
+# ---- commands ---------------------------------------------------------------
+cmd_up() {
+  preflight
+  cd "$REPO_DIR"
+  ensure_repo
+  running && die "Sandbox '$NAME' already exists. Use '$0 shell', or '$0 rm' to recreate."
+
+  apply_network
+  info "Starting $AGENT in a microVM sandbox '$NAME' (clone mode, unattended)."
+  info "Review its commits on your host with:  git fetch sandbox-$NAME"
+  warn "Full network isolation applies only under a balanced/deny-all default."
+  warn "For strict isolation run once:  $0 lockdown"
+
+  # --clone: agent works on a private clone; host repo mounted read-only.
+  # sbx launches Claude Code with --dangerously-skip-permissions by default.
+  # Any extra args after the command are passed through to the agent, e.g.:
+  #   ./claude-sbx up -- -p "refactor the auth module and run the tests"
+  if [ "$#" -gt 0 ]; then
+    sbx run --clone --name "$NAME" "$AGENT" "$@"
+  else
+    sbx run --clone --name "$NAME" "$AGENT"
+  fi
+}
+
+cmd_shell() { preflight; sbx exec -it "$NAME" bash; }
+
+cmd_fetch() { preflight; git -C "$REPO_DIR" fetch "sandbox-$NAME"; }
+
+cmd_diff() {
+  preflight
+  git -C "$REPO_DIR" fetch "sandbox-$NAME"
+  base="${1:-$(current_branch)}"
+  git -C "$REPO_DIR" diff "$base..sandbox-$NAME/$base"
+}
+
+cmd_merge() {
+  preflight
+  git -C "$REPO_DIR" fetch "sandbox-$NAME"
+  base="${1:-$(current_branch)}"
+  info "Merging sandbox-$NAME/$base into $base"
+  git -C "$REPO_DIR" merge "sandbox-$NAME/$base"
+}
+
+cmd_net()  { preflight; sbx policy log; }
+
+cmd_stop() { preflight; sbx stop "$NAME"; info "Stopped '$NAME'. Its VM and commits are preserved."; }
+
+cmd_rm() {
+  preflight
+  warn "Removing '$NAME' deletes its clone. Unfetched or unpushed commits are lost."
+  printf 'Fetch its commits first? [Y/n] '
+  read -r ans
+  [ "${ans:-}" = n ] || git -C "$REPO_DIR" fetch "sandbox-$NAME" 2>/dev/null || true
+  sbx rm "$NAME"
+}
+
+cmd_lockdown() {
+  preflight
+  info "Setting the default network policy to deny-all for all sandboxes."
+  info "Revert at any time with:  sbx policy reset"
+  sbx policy set-default deny-all
+  apply_network
+  info "Locked down. '$NAME' may reach only the allowlist above."
+}
+
+usage() {
+  cat <<EOF
+claude-sbx — run Claude Code unattended in a Docker Sandbox
+
+Usage: $(basename "$0") <command> [args]
+
+  up [-- agent-args]  Create and start the sandbox (clone mode, YOLO, restricted net)
+  shell               Open a shell inside the running sandbox
+  fetch               git fetch the agent's commits (remote: sandbox-<name>)
+  diff  [base]        Fetch, then diff base..sandbox-<name>/base
+  merge [base]        Fetch, then merge the agent's branch into base
+  net                 Show the sandbox network log (allowed / blocked hosts)
+  stop                Stop the sandbox, keeping the VM and its commits
+  rm                  Remove the sandbox (offers to fetch first, then deletes it)
+  lockdown            Set deny-all default policy and reapply the allowlist
+  help                Show this message
+
+Config: edit ./sandbox.conf (see sandbox.conf.example) or set env vars.
+Active sandbox name: $NAME
+EOF
+}
+
+case "${1:-help}" in
+  up)       shift; cmd_up "$@" ;;
+  shell)    shift; cmd_shell "$@" ;;
+  fetch)    shift; cmd_fetch "$@" ;;
+  diff)     shift; cmd_diff "$@" ;;
+  merge)    shift; cmd_merge "$@" ;;
+  net)      shift; cmd_net "$@" ;;
+  stop)     shift; cmd_stop "$@" ;;
+  rm)       shift; cmd_rm "$@" ;;
+  lockdown) shift; cmd_lockdown "$@" ;;
+  help|-h|--help) usage ;;
+  *) err "Unknown command: $1"; echo; usage; exit 1 ;;
+esac
