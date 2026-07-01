@@ -37,9 +37,21 @@ On macOS and Windows, follow Docker's [official install guide](https://docs.dock
 Install Code Airlock:
 
 ```bash
+curl -fsSL https://raw.githubusercontent.com/Trivo25/code-airlock/main/install.sh | sh
+```
+
+Or clone it manually:
+
+```bash
 git clone https://github.com/Trivo25/code-airlock.git
 cd code-airlock
 ln -s "$PWD/code-airlock" ~/.local/bin/code-airlock
+```
+
+The installer writes to `~/.local/bin` by default. Choose another location with:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/Trivo25/code-airlock/main/install.sh | PREFIX=/usr/local/bin sh
 ```
 
 Run it from the repo you want the agent to work on:
